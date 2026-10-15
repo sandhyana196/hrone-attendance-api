@@ -1,28 +1,54 @@
 # REVIEW.md
 
-The following defects were verified by tracing the starter implementation against `openapi.yaml` and R1-R10. The replacement implementation is in `app/main.py`.
+## Overview
 
-| # | Where (function / line) | What is wrong | How you'd notice it (test, input, or symptom) | How you fixed it |
+Reviewed the starter implementation against `openapi.yaml`, `DATA_MODEL.md`, and the R1–R10 requirements. The replacement implementation is in `app/main.py`.
+
+The findings below describe defects identified in the starter implementation and the corresponding changes made in the replacement. Verification notes are listed separately so that implementation changes are not confused with test results.
+
+## Findings and Fixes
+
+| # | Area | Finding in the starter implementation | Detection approach | Change made |
 |---|---|---|---|---|
-| 1 | `health` | Always returned `{"status":"ok"}` without contacting MongoDB. | Stop MongoDB and call `/health`; it still returned 200. | Ping MongoDB and return 503 on a PyMongo failure. |
-| 2 | `create_employee` | Check-then-insert did not prevent concurrent duplicate employee codes. | Send simultaneous POSTs with the same `emp_code`. | Create a unique `emp_code` index and map `DuplicateKeyError` to 409. |
-| 3 | `create_employee` / `EmployeeIn` | Input fields and shift equality were not validated to the contract. | Send malformed employee code/email/date, invalid shift time, or equal shift start/end. | Added Pydantic validation matching the documented patterns and constraints. |
-| 4 | `create_employee` | Stored `created_at` as a naive local `datetime`, and returned it without epoch milliseconds. | Inspect the stored instant or compare API output with the required epoch-ms format. | Store UTC BSON datetimes and serialize instants to integer milliseconds. |
-| 5 | `list_employees` | Used `page * page_size` as the offset, skipping the first page. | With 25 employees, page 1 of size 20 returned the last 5. | Use `(page - 1) * page_size`; validate page and page size. |
-| 6 | `list_employees` | `total` counted the whole collection rather than the department-filtered set. | Filter by a department and compare `total` with that department's count. | Count using the same query as the result list. |
-| 7 | `list_employees` | Did not sort by `emp_code`, as required. | Insert codes in reverse order and list them. | Sort ascending by `emp_code`. |
-| 8 | `punch_in` | Did not return 404 for an unknown employee before dereferencing `emp`. | Punch in with an unknown `emp_code`; starter code could fail with 500. | Check the employee and return 404. |
-| 9 | `punch_in` | Used local-time `fromtimestamp` / `now`, so date and stored instant depended on the machine timezone; it did not truncate instants to whole seconds. | Use an epoch timestamp near midnight or with fractional seconds. | Convert epoch milliseconds explicitly to UTC, derive the IST attendance date, and truncate to seconds. |
-| 10 | `punch_in` | Checked for an existing record and then inserted without an atomic uniqueness guarantee. | Concurrent same-day punch-ins could both pass the check. | Enforce unique `(emp_code, date)` in MongoDB and map duplicate-key errors to 409. |
-| 11 | `compute_late_minutes` | Compared whole minutes to the grace period, losing the strict second boundary. | For a 09:30 shift, 09:40:01 must return 10, not 0. | Compare elapsed seconds strictly against 600, then floor elapsed minutes. Overnight starts are handled against the prior date when appropriate. |
-| 12 | `compute_work_hours` | Used Python's banker's `round`, not half-up rounding. | A value exactly at a half-cent boundary can round differently. | Use `Decimal` with `ROUND_HALF_UP`. |
-| 13 | `compute_overtime` | Did not handle overnight shifts and did not apply the minimum 30-minute threshold. | A 5-minute overrun should be 0; a 40-minute overnight overrun should be 40. | Compute shift end from the attendance date and overnight rule; return minutes only at 30 or more. |
-| 14 | `list_attendance` | Loaded all matching attendance documents into Python to sort, count and paginate. | Performance and memory usage degrade on 100,000 records. | Apply MongoDB sort/skip/limit and a filtered `count_documents` query. |
-| 15 | `list_attendance` | Did not validate date ranges/status and omitted consistent response serialization/defaults. | Try `date_from > date_to` or inspect timestamps/history. | Validate filters and normalize dates, derived defaults and audit timestamp values at the API boundary. |
-| 16 | Missing endpoints | Punch-out, regularization, monthly analytics, department summary, late leaderboard, department trend and explain endpoint were not implemented. | Calls to contract paths returned 404. | Implemented the missing paths and their business rules in the single required `app/main.py`. |
+| 1 | Health check | Returned success without checking MongoDB connectivity. | Stop MongoDB and call `/health`. | Added a database ping and a 503 response when MongoDB is unavailable. |
+| 2 | Employee creation | Duplicate employee codes could race during concurrent requests. | Submit simultaneous requests with the same employee code. | Added a unique index and mapped duplicate-key errors to 409. |
+| 3 | Employee validation | Employee fields and shift values were insufficiently validated. | Submit malformed codes, emails, dates, or shift times. | Added Pydantic validation for documented field constraints. |
+| 4 | Employee timestamps | Creation timestamps did not consistently follow the required UTC and epoch-millisecond API conventions. | Compare stored timestamps with API output. | Added UTC storage and epoch-millisecond serialization. |
+| 5 | Employee pagination | Pagination offsets and filtered totals could be incorrect. | Test multiple pages and department filters. | Applied the correct page offset and filtered count. |
+| 6 | Employee ordering | Employee results did not consistently follow the required code ordering. | Insert employees in a different order and list them. | Sorted results by employee code. |
+| 7 | Punch-in validation | Unknown employees were not handled consistently. | Punch in with an unknown employee code. | Added a 404 response for missing employees. |
+| 8 | Punch-in timestamps | Local-time conversion and fractional seconds could affect attendance dates and stored instants. | Test timestamps near midnight and with fractional seconds. | Added explicit UTC conversion, IST attendance-date derivation, and second-level truncation. |
+| 9 | Duplicate attendance | Concurrent same-day punch-ins needed a database-enforced uniqueness guarantee. | Submit simultaneous punch-ins for the same employee and date. | Added a unique `(emp_code, date)` index and a 409 conflict response. |
+| 10 | Late calculations | Grace-period handling needed an exact seconds-based boundary. | Compare punches at 10 minutes and 10 minutes 1 second after shift start. | Applied the strict 600-second boundary and whole-minute flooring. |
+| 11 | Work-hour rounding | Standard Python rounding does not guarantee the required half-up behavior. | Test values at rounding boundaries. | Used `Decimal` with `ROUND_HALF_UP`. |
+| 12 | Overtime | Overnight shifts and the minimum overtime threshold needed explicit handling. | Test short overruns and overnight shifts. | Added shift-end calculation and the 30-minute minimum threshold. |
+| 13 | Attendance listing | Sorting and pagination should be performed by MongoDB rather than loading all matching records into Python. | Inspect query behavior and test pagination. | Added database-side sorting, skipping, limiting, and filtered counts. |
+| 14 | Filter validation | Invalid date ranges and status values needed consistent rejection. | Submit reversed dates and invalid statuses. | Added validation and 422 responses. |
+| 15 | Analytics and audit behavior | Several contract endpoints and business rules were missing from the starter implementation. | Compare implemented routes with `openapi.yaml`. | Added punch-out, regularization, monthly analytics, department summary, late leaderboard, department trend, and explain endpoints. |
+| 16 | Concurrent updates | Attendance updates needed protection against competing requests. | Submit simultaneous updates to the same attendance record. | Added conditional punch-out updates and optimistic concurrency checks for regularization. |
 
-## Inspected and retained
+## Development and Verification Notes
 
-- `emp_code` remains the employee's business identifier; MongoDB `_id` is not exposed.
-- Calendar dates remain `YYYY-MM-DD` strings and shift times remain `HH:MM` strings, as required by `DATA_MODEL.md`.
-- Analytics use stored `late_minutes`, `overtime_minutes`, `work_hours` and `half_day` values instead of recomputing them from seeded punch times.
+The following behaviors were exercised during development:
+
+- Late-arrival grace-period boundaries: exactly 10 minutes and 10 minutes 1 second.
+- Work-hour rounding at representative boundary values.
+- Overtime thresholds, including an overrun below 30 minutes, exactly 30 minutes, and an overnight shift.
+- Half-day classification using the rounded work-hour value.
+- Attendance listing, monthly analytics, department summary, leaderboard, and department trend responses.
+- Department trend output for a date range with no attendance records, including weekdays, weekends, headcount, and moving averages.
+- Explain execution statistics for the five supported analytics/listing query types.
+
+These checks are development verification, not a guarantee that every hidden evaluation test passes. The final implementation should be evaluated against the complete assignment contract.
+
+## Design Constraints Preserved
+
+- Employee business identifiers use `emp_code`; MongoDB `_id` is not exposed in normal API responses.
+- Calendar dates use `YYYY-MM-DD`; shift times use `HH:MM`.
+- Attendance instants use epoch milliseconds in API requests and responses and UTC BSON datetimes in MongoDB.
+- Derived work hours, late minutes, overtime minutes, and half-day values are stored and used by analytics.
+- Analytics calculations are intended to run in MongoDB aggregation pipelines, with API-side formatting limited to response serialization and rounding.
+
+## Remaining Review Considerations
+
+Before final submission, verify the final code against every requirement, especially empty-range trend aggregation, matching explain pipelines, missing-history regularization behavior, concurrency, and index usage. Any unresolved limitation should be documented accurately rather than described as a completed fix.
